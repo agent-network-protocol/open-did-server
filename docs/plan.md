@@ -1,6 +1,6 @@
 # Open DID Server 项目方案
 
-状态：首版本地实现已完成。正式 HTTPS 验收未执行。
+状态：首版本地实现已完成。2026-10-01 曾把 `rwiki.cn` 临时指到本服务，用开启证书校验的 `https://rwiki.cn` 跑通系统测试示例，并已恢复该域名原有 nginx 配置。这不是持续部署。
 
 创建日期：2026-10-01。
 
@@ -16,14 +16,16 @@ P0 仍以 `458b842` 的方案为准。P1 至 P4 的代码、测试、客户端�
 - Handle 的 suspended / revoked、generation、本地 DID 暂停不自动恢复 Handle。
 - 受信代理重建 `https://did.example.test/...`，以及 `PUBLIC_DID_PORT=8443` 时 DID 带端口、Handle URL 不带端口。
 - 独立客户端进程 `examples/client/run.py`。文档解析使用 `base_url_override`，记录为 development demo。
+- 独立进程 `examples/system/run.py` 在回环上报告 WBA/Web 上传、标准文档 `id` 一致、Handle 查询、whoami，以及同一签名重放被拒绝。
+- 2026-10-01 临时把 `rwiki.cn` 的 apex 443 反代到独立数据目录上的本服务（`LOCAL_DEMO_MODE=0`，签名 URL 为 `https://rwiki.cn/...`，证书校验保持默认，没有使用 `base_url_override`）。同一系统测试示例在该 HTTPS 地址上得到与回环相同的通过和重放拒绝结果；标准文档响应体里的 `id` 等于上传的 DID，whoami 返回该 DID。验收前保存的 `/etc/nginx/conf.d/rwiki.cn.conf` 已写回。恢复后 `GET https://rwiki.cn/` 仍是 `{"environment":"rwiki","domain":"rwiki.cn","ok":true}`，临时测试文档路径返回 404。没有修改或重启 `awiki.info`。
 - 用手写签名基串和固定摘要 `sha-256=:pY6BR0NZSvSfPExR0TrlXPyGrAwda96+tKyvsnJWEpk=:` 验证 echo。该基串不是 `generate_http_signature_headers` 生成的。调换参数顺序后服务返回 401。
 - 用旧数据库覆盖已前进的高水位事实后，服务进入维护。等到签名窗口结束，`clear-maintenance` 仍然不会补回丢失的 tombstone、稳定路径或已撤销 grant。只丢掉已消费 nonce、其余事实仍匹配时，同样进入维护。重放截止时间写在高水位文件里，按发现落后的那次时钟计算，比普通维护多一个时钟偏差再加 1 秒。数据库里更早一次维护的开始时间不会提前打开认证，也不会把 `nonce_watermark` 写低；窗口结束后是把数据库水位抬到文件里的值。进程在水位仍超前时再次启动，会把截止时间从新的时钟向前推。
 - 正式模式的 WBA HTTPS 解引用发生在绑定事务提交并释放写锁之后。创建和状态更新都能因此读到新 generation。这项顺序由测试中的替身响应证明，不是公网验收。
 
-未执行，不能写成通过：
+不能写成持续通过：
 
-- 真实公网域名、证书和反向代理上的正式 HTTPS 验收。
-- 正式模式下 WBA `exact-handle` 的公网解引用。本地模式只报告 `declaration-consistent` 或 `web-provider-domain`。
+- Open DID Server 没有留在 `rwiki.cn` 上，也没有另一套长期正式部署。上面的 HTTPS 结果只属于那次临时反代。
+- 临时窗口的访问日志里，PUT Handle 完成记录之前出现了一次对该 Handle 的公网 GET 200，与绑定事务提交后的解引用顺序一致。恢复原配置之后，这条公网能力不再由本服务提供。本地模式仍只报告 `declaration-consistent` 或 `web-provider-domain`。没有把这次结果写成持续的 `exact-handle` 验收。
 - 完整 RFC 9421 互通。首版只接受 api.md 中的单个 `sig1` 形态。
 
 SDK 已核对、由应用层补上的边界：`DidWbaVerifier` 不用于示例接口；`verify_handle_binding` 的成功不报告为 `exact-handle`；线上参数顺序在调用 SDK 验签之前检查。
@@ -472,10 +474,10 @@ README 提供已经在本机执行过的最短路径：安装 → 启动 → 创
 | P0：仓库与方案 | 公开仓库、许可证、简介、整体方案 | 本地目录与 GitHub 仓库对应 | 已完成，提交 `458b842` |
 | P1：基础验证与最小流程 | 锁定 SDK 制品、本地 grant、WBA/Web 与 proof、严格签名适配、最小发布与 whoami | 两种 DID 的真实 HTTP 上传和签名请求；独立签名向量 | 已在本地测试中执行 |
 | P2：完整文档服务 | 稳定路径、规范化 URL、结构与生命周期、更新与标准分发 | 拒绝越权、非法文档、等价 URL 和第二个指纹 | 已在本地测试中执行 |
-| P3：名称服务 | 正反向查询、状态机、generation、声明一致性 | 首次绑定无引导循环；revoked 不可恢复；WBA/Web 分开处理 | 已在本地测试中执行。公网 `exact-handle` 未执行 |
-| P4：部署与互通验收 | 代理配置、客户端、本地 IP 路径、备份说明、有限签名互通 | 独立进程走完本地流程；旧快照不能直接恢复服务；RFC 9421 范围单独记录 | 本地流程、代理 URL 重建和恢复限制已执行。正式 HTTPS 未执行 |
+| P3：名称服务 | 正反向查询、状态机、generation、声明一致性 | 首次绑定无引导循环；revoked 不可恢复；WBA/Web 分开处理 | 已在本地测试中执行。`rwiki.cn` 临时窗口里出现过一次公网 Handle GET，配置已恢复，不作为持续 `exact-handle` 验收 |
+| P4：部署与互通验收 | 代理配置、客户端、本地 IP 路径、备份说明、有限签名互通 | 独立进程走完本地流程；旧快照不能直接恢复服务；RFC 9421 范围单独记录 | 本地流程、代理 URL 重建和恢复限制已执行。2026-10-01 对 `https://rwiki.cn` 做过一次开启证书校验的临时验收，原 nginx 配置已恢复，不是持续部署 |
 
-下面这些场景是验收清单。本地测试和 `examples/client/run.py` 覆盖了发布、分发、签名边界、Handle 状态、重放、代理 URL 重建和旧快照维护。清单里没有逐条对应一个测试名。正式 HTTPS 和公网 `exact-handle` 没有执行：
+下面这些场景是验收清单。本地测试、`examples/client/run.py` 和 `examples/system/run.py` 覆盖了发布、分发、签名边界、Handle 状态、重放、代理 URL 重建和旧快照维护。清单里没有逐条对应一个测试名。`https://rwiki.cn` 上的 HTTPS 系统测试是一次临时验收，域名配置已经恢复；持续的公网 `exact-handle` 没有留下：
 
 - WBA E1 与 Web 分别上传、解析、绑定 Handle，并完成 GET/POST 签名请求。
 - 拒绝私钥上传、错误文档 `id`、错误 WBA 指纹/proof、非法路径、不同 DID 占用同一 URL。
@@ -493,7 +495,7 @@ README 提供已经在本机执行过的最短路径：安装 → 启动 → 创
 - 旧快照缺少高水位事实、归属、tombstone，或只丢掉已消费 nonce 时保持维护状态，不从旧数据开始正常服务。等到窗口结束也不能补回丢失的归属或 tombstone。认证失败 Header 与 JSON 分类一致，发布凭据不替代 DID 签名。
 - 标准 DID 路径的 404、ETag/304、并发更新的版本冲突和代理外部 URL 重建符合约定。
 - 本地 IP 请求使用真实 IP URL 签名，仍保留合法域名 DID；通过显式 override 读取文档；不把本地 HTTP 名称查询当作正式 HTTPS 绑定证明。
-- 独立客户端进程通过真实 HTTP 发出请求，避免只用进程内路由调用代替完整示例。正式 HTTPS 请求没有在本次验收中发出。
+- 独立客户端进程通过真实 HTTP 发出请求，避免只用进程内路由调用代替完整示例。对 `https://rwiki.cn` 的 HTTPS 系统测试见第 0 节，那次临时反代已经恢复。
 
 ## 13. 协议与代码参考
 

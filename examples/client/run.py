@@ -150,7 +150,8 @@ def main() -> None:
         )
 
 
-def _publish(base: str, token: str, document: dict, key) -> dict:
+def signed_publish(base: str, token: str, document: dict, key) -> tuple[int, dict]:
+    """POST a candidate document. Callers share this request with the demo client."""
     body = _dumps(document)
     url = f"{base}/api/v1/did-documents"
     headers = sign_headers(
@@ -162,10 +163,11 @@ def _publish(base: str, token: str, document: dict, key) -> dict:
         body,
         {"Content-Type": "application/json", "ANP-Publication-Token": token},
     )
-    return _request("POST", url, body, headers)
+    return exchange("POST", url, body, headers)
 
 
-def _bind(base: str, token: str, local_part: str, document: dict, key) -> dict:
+def signed_bind(base: str, token: str, local_part: str, document: dict, key) -> tuple[int, dict]:
+    """PUT a Handle binding with the same request the demo client sends."""
     body = _dumps({"did": document["id"], "status": "active"})
     url = f"{base}/api/v1/handles/{local_part}"
     headers = sign_headers(
@@ -177,7 +179,19 @@ def _bind(base: str, token: str, local_part: str, document: dict, key) -> dict:
         body,
         {"Content-Type": "application/json", "ANP-Publication-Token": token},
     )
-    return _request("PUT", url, body, headers)
+    return exchange("PUT", url, body, headers)
+
+
+def _publish(base: str, token: str, document: dict, key) -> dict:
+    return _require_success(*signed_publish(base, token, document, key), "POST", f"{base}/api/v1/did-documents")
+
+
+def _bind(base: str, token: str, local_part: str, document: dict, key) -> dict:
+    return _require_success(
+        *signed_bind(base, token, local_part, document, key),
+        "PUT",
+        f"{base}/api/v1/handles/{local_part}",
+    )
 
 
 def _resolve_demo(wba_did: str, web_did: str, base: str) -> None:
@@ -214,16 +228,35 @@ def _verify_https(provider: str, local_part: str) -> None:
         raise SystemExit(2)
 
 
-def _request(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> dict:
+def exchange(method: str, url: str, body: bytes | None, headers: dict[str, str], timeout: int = 20) -> tuple[int, dict]:
+    """Send one HTTP request. Certificate checks stay at the interpreter default."""
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with opener.open(request, timeout=10) as response:
+        with opener.open(request, timeout=timeout) as response:
+            status = response.status
             payload = response.read()
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise SystemExit(f"{method} {url} failed: {exc.code} {detail}") from exc
-    return json.loads(payload.decode("utf-8"))
+        status = exc.code
+        payload = exc.read()
+    text = payload.decode("utf-8", errors="replace")
+    try:
+        parsed = json.loads(text) if text else {}
+    except json.JSONDecodeError:
+        parsed = {"raw": text}
+    if not isinstance(parsed, dict):
+        parsed = {"value": parsed}
+    return status, parsed
+
+
+def _require_success(status: int, payload: dict, method: str, url: str) -> dict:
+    if status >= 400:
+        raise SystemExit(f"{method} {url} failed: {status} {json.dumps(payload, ensure_ascii=False)}")
+    return payload
+
+
+def _request(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> dict:
+    return _require_success(*exchange(method, url, body, headers), method, url)
 
 
 def _get_json(url: str) -> dict:
