@@ -1,8 +1,35 @@
 # Open DID Server 项目方案
 
-状态：设计草案，尚未开发。
+状态：首版本地实现已完成。正式 HTTPS 验收未执行。
 
 创建日期：2026-10-01。
+
+## 0. 首版实施记录（2026-10-01）
+
+P0 仍以 `458b842` 的方案为准。P1 至 P4 的代码、测试、客户端和部署示例已在本仓库实现，依赖锁定为 PyPI `anp==1.0.5`（registry `https://pypi.org/simple`，wheel `anp-1.0.5-py3-none-any.whl`）。没有修改 ANP SDK。
+
+已在本机用独立数据目录和回环端口执行：
+
+- WBA E1 与 Web 的上传、标准 `did.json` 原文读取、Handle 绑定、whoami 和 echo。
+- 稳定主体路径冲突、主机大小写与 `:443` 规范化冲突、proof 被破坏、非 `authentication` 键、发布凭据替换、`If-Match` / `Content-Type` / 正文 / 目标 URL 篡改。
+- 重复签名头、参数顺序、时间窗口、重复重放、并发更新、并发重放，以及签名有效期内进程重启后的重放拒绝。
+- Handle 的 suspended / revoked、generation、本地 DID 暂停不自动恢复 Handle。
+- 受信代理重建 `https://did.example.test/...`，以及 `PUBLIC_DID_PORT=8443` 时 DID 带端口、Handle URL 不带端口。
+- 独立客户端进程 `examples/client/run.py`。文档解析使用 `base_url_override`，记录为 development demo。
+- 用手写签名基串和固定摘要 `sha-256=:pY6BR0NZSvSfPExR0TrlXPyGrAwda96+tKyvsnJWEpk=:` 验证 echo。该基串不是 `generate_http_signature_headers` 生成的。调换参数顺序后服务返回 401。
+- 用旧数据库覆盖已前进的高水位事实后，服务进入维护，`clear-maintenance` 不会因为等待而成功。
+
+未执行，不能写成通过：
+
+- 真实公网域名、证书和反向代理上的正式 HTTPS 验收。
+- 正式模式下 WBA `exact-handle` 的公网解引用。本地模式只报告 `declaration-consistent` 或 `web-provider-domain`。
+- 完整 RFC 9421 互通。首版只接受 api.md 中的单个 `sig1` 形态。
+
+SDK 已核对、由应用层补上的边界：`DidWbaVerifier` 不用于示例接口；`verify_handle_binding` 的成功不报告为 `exact-handle`；线上参数顺序在调用 SDK 验签之前检查。
+
+## 实施记录之后的原文
+
+下面各节保留设计时的规则。和本节冲突时，以本节的验收事实和第 1–9 节的设计规则为准；第 11 节的“当前只创建文档”描述的是 P0 当时的仓库，不是现在的代码布局。
 
 组织：`agent-network-protocol`。
 
@@ -393,7 +420,7 @@ HTTPS 反向代理终止 TLS 时，服务端重建的外部 URL 必须与客户�
 
 覆盖地址仅来自运维/开发配置，不能由外部请求、DID 文档或 Handle 记录指定。正式模式拒绝本地 HTTP 覆盖，保持 TLS 校验。不要用关闭全局证书校验来伪装正式解析。
 
-本地 IP 演示的方案基于现有 SDK 公开函数设计，目前没有执行验证。若实现阶段发现仍需修改 SDK 才能完成某一环节，先保留已验证的域名版本，并报告该限制，不扩展到 SDK 改动。
+本地 IP 演示已用回环 HTTP 和合法域名 DID 执行。客户端对 `http://127.0.0.1:端口` 签名，并用显式 `base_url_override` 解析，结果标记为 development demo。正式 HTTPS 验收没有执行。实现阶段没有发现必须修改 SDK 才能完成这一本地路径的缺口。
 
 ## 10. 数据模型与持久化
 
@@ -408,9 +435,9 @@ HTTPS 反向代理终止 TLS 时，服务端重建的外部 URL 必须与客户�
 
 这些是逻辑记录，不强制一开始建立通用 ORM 或插件式存储层。数据目录不进入 Git；导出公开文档与备份含凭据摘要的数据库应使用不同操作。
 
-## 11. 后续仓库布局
+## 11. 仓库布局
 
-当前只创建 `README.md`、`LICENSE`、`.gitignore` 与 `docs/plan.md`。下列目录仅表示未来建议，不在本次生成：
+P0 当时只有 `README.md`、`LICENSE`、`.gitignore` 与 `docs/plan.md`。首版代码已经落地，模块按职责放在 `src/open_did_server/`（`app.py`、`service.py`、`signatures.py`、`documents.py`、`canonical.py`、`store.py`、`highwater.py`、`identity.py`、`cli.py`），没有拆成下面草图中的子包。部署示例在 `deploy/`。下列树是当时的建议布局：
 
 ```text
 open-did-server/
@@ -435,21 +462,19 @@ open-did-server/
 └── .env.example
 ```
 
-后续 README 应提供实际可执行的最短路径：安装 → 启动 → 创建身份 → 上传 → 查询 → 签名请求。当前 README 明确标注方案阶段，不提供尚不存在的运行命令。
+README 提供已经在本机执行过的最短路径：安装 → 启动 → 创建身份 → 上传 → 查询 → 签名请求。正式 HTTPS 不在该路径内。
 
 ## 12. 分阶段实施与验收
 
-以下是已经立项的本项目内部剩余工作，保留在此方案中；执行仍需后续开发指令。
+| 阶段 | 交付内容 | 完成标准 | 2026-10-01 状态 |
+|---|---|---|---|
+| P0：仓库与方案 | 公开仓库、许可证、简介、整体方案 | 本地目录与 GitHub 仓库对应 | 已完成，提交 `458b842` |
+| P1：基础验证与最小流程 | 锁定 SDK 制品、本地 grant、WBA/Web 与 proof、严格签名适配、最小发布与 whoami | 两种 DID 的真实 HTTP 上传和签名请求；独立签名向量 | 已在本地测试中执行 |
+| P2：完整文档服务 | 稳定路径、规范化 URL、结构与生命周期、更新与标准分发 | 拒绝越权、非法文档、等价 URL 和第二个指纹 | 已在本地测试中执行 |
+| P3：名称服务 | 正反向查询、状态机、generation、声明一致性 | 首次绑定无引导循环；revoked 不可恢复；WBA/Web 分开处理 | 已在本地测试中执行。公网 `exact-handle` 未执行 |
+| P4：部署与互通验收 | 代理配置、客户端、本地 IP 路径、备份说明、有限签名互通 | 独立进程走完本地流程；旧快照不能直接恢复服务；RFC 9421 范围单独记录 | 本地流程、代理 URL 重建和恢复限制已执行。正式 HTTPS 未执行 |
 
-| 阶段 | 交付内容 | 完成标准 |
-|---|---|---|
-| P0：仓库与方案（本次） | 公开仓库、许可证、简介、整体方案 | 本地目录与 GitHub 仓库对应；仅文档和基础仓库文件；链接、路径与 Git 提交可核对 |
-| P1：基础验证与最小流程 | 锁定 SDK 制品、本地 grant 初始化、WBA/Web 构建与 proof、严格签名适配层、最小发布与 whoami | 两种 DID 各完成真实 HTTP 上传和签名请求；验证底层能力和引导不依赖尚未发布的文档；独立签名向量覆盖关键边界 |
-| P2：完整文档服务 | 稳定路径归属、规范化资源键、结构/生命周期校验、更新与事务版本控制、标准分发 | 拒绝越权/非法文档/等价 URL 冲突/稳定路径重分配；更新与状态管理原子且版本可控 |
-| P3：名称服务 | 正反向查询、状态机、generation、双向声明与文档更新一致性 | 首次绑定无引导循环；并发更新不生成陈旧绑定；WBA/Web 分别遵循自己的模型；revoked 不可恢复 |
-| P4：部署与互通验收 | HTTPS 与代理、完整客户端、本地 IP 路径、部署/备份恢复说明、独立实现向量 | 实际进程间完成流程；确认受限签名格式互通，单独记录完整 RFC 兼容范围；旧快照不能直接恢复正常 Provider 服务 |
-
-后续实现应覆盖以下关键验收场景。本次不执行这些测试：
+下面这些场景是验收清单。本地测试和 `examples/client/run.py` 覆盖了发布、分发、签名边界、Handle 状态、重放、代理 URL 重建和旧快照维护。清单里没有逐条对应一个测试名。正式 HTTPS 和公网 `exact-handle` 没有执行：
 
 - WBA E1 与 Web 分别上传、解析、绑定 Handle，并完成 GET/POST 签名请求。
 - 拒绝私钥上传、错误文档 `id`、错误 WBA 指纹/proof、非法路径、不同 DID 占用同一 URL。
@@ -467,7 +492,7 @@ open-did-server/
 - 旧快照缺少高水位、归属或 tombstone 时保持维护状态，不从旧数据开始正常服务；认证失败 Header 与 JSON 分类一致，发布凭据不替代 DID 签名。
 - 标准 DID 路径的 404、ETag/304、并发更新的版本冲突和代理外部 URL 重建符合约定。
 - 本地 IP 请求使用真实 IP URL 签名，仍保留合法域名 DID；通过显式 override 读取文档；不把本地 HTTP 名称查询当作正式 HTTPS 绑定证明。
-- 独立客户端进程通过真实 HTTP/HTTPS 发出请求，避免只用进程内路由调用代替完整示例。
+- 独立客户端进程通过真实 HTTP 发出请求，避免只用进程内路由调用代替完整示例。正式 HTTPS 请求没有在本次验收中发出。
 
 ## 13. 协议与代码参考
 

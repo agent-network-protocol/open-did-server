@@ -1,0 +1,10 @@
+# 将 did.example.test 换成实际域名。Caddy 终止 TLS 后把请求转到回环端口。
+# 服务进程需要：
+#   LOCAL_DEMO_MODE=0
+#   REQUEST_BASE_URL=https://did.example.test
+#   TRUSTED_PROXY_CIDRS=127.0.0.1/32
+# 客户端签名的 URL 必须是 https://did.example.test/... ，不能签回环地址。
+
+did.example.test {
+	reverse_proxy 127.0.0.1:8765
+}

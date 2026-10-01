@@ -5,6 +5,9 @@
 *.pem
 *.key
 data/
+*.sqlite
+*.sqlite3
+*.db
 
 # Python tooling
 .venv/

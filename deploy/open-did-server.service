@@ -1,0 +1,23 @@
+[Unit]
+Description=Open DID Server
+After=network.target
+
+[Service]
+Type=simple
+User=open-did
+Group=open-did
+WorkingDirectory=/opt/open-did-server
+Environment=OPEN_DID_DATA_DIR=/var/lib/open-did-server
+Environment=OPEN_DID_HOST=127.0.0.1
+Environment=OPEN_DID_PORT=8765
+Environment=PUBLIC_DID_DOMAIN=did.example.test
+Environment=PUBLIC_DID_PORT=443
+Environment=HANDLE_PROVIDER_DOMAIN=did.example.test
+Environment=REQUEST_BASE_URL=https://did.example.test
+Environment=LOCAL_DEMO_MODE=0
+Environment=TRUSTED_PROXY_CIDRS=127.0.0.1/32
+ExecStart=/opt/open-did-server/.venv/bin/open-did-server serve
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

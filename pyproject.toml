@@ -1,0 +1,38 @@
+[project]
+name = "open-did-server"
+version = "0.1.0"
+description = "Reference server for did:wba and did:web documents, Handles, and ANP HTTP signatures."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{name = "ANP Open Source Community"}]
+dependencies = [
+    "anp==1.0.5",
+    "cryptography>=43,<47",
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.32,<1",
+]
+
+[project.scripts]
+open-did-server = "open_did_server.cli:main"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27,<1",
+    "pytest>=8,<9",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/open_did_server"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src/open_did_server" = "open_did_server"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["src"]
