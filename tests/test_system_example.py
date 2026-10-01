@@ -150,23 +150,38 @@ def test_system_example_reports_wba_web_and_replay(tmp_path):
         events = [json.loads(line) for line in client.stdout.splitlines() if line.startswith("{")]
         by_case = {event["case"]: event for event in events}
         for name in (
-            "wba-upload",
+            "wba-publish",
             "wba-read",
             "wba-handle",
             "wba-whoami",
-            "web-upload",
+            "wba-echo",
+            "web-publish",
             "web-read",
             "web-handle",
             "web-whoami",
+            "web-echo",
         ):
             assert by_case[name]["result"] == "pass", by_case[name]
             assert by_case[name]["http"] < 400
+        assert by_case["wba-create"]["result"] == "pass"
+        assert by_case["wba-create"]["published"] is False
+        assert by_case["web-create"]["published"] is False
+        assert by_case["wba-create"]["id"] == by_case["wba-publish"]["id"]
+        assert by_case["web-create"]["id"] == by_case["web-publish"]["id"]
+        assert by_case["wba-publish"]["published"] is True
+        assert by_case["web-publish"]["published"] is True
         assert by_case["wba-read"]["matched"] is True
         assert by_case["web-read"]["matched"] is True
         assert by_case["wba-read"]["id"].startswith("did:wba:")
         assert by_case["web-read"]["id"].startswith("did:web:")
         assert by_case["wba-whoami"]["did"] == by_case["wba-read"]["id"]
         assert by_case["web-whoami"]["did"] == by_case["web-read"]["id"]
+        assert by_case["wba-whoami"]["authenticated"] is True
+        assert by_case["web-whoami"]["authenticated"] is True
+        assert by_case["wba-whoami"]["auth_scheme"] == "http_signatures"
+        assert by_case["wba-echo"]["body"] == {"hello": "wba"}
+        assert by_case["web-echo"]["did"] == by_case["web-read"]["id"]
+        assert by_case["web-echo"]["auth_scheme"] == "http_signatures"
         assert by_case["wba-handle"]["did"] == by_case["wba-read"]["id"]
         assert by_case["web-handle"]["status"] == "active"
         replay = by_case["whoami-replay"]

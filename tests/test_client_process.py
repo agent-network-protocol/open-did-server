@@ -176,7 +176,7 @@ def test_client_process_publishes_and_replay_survives_restart(tmp_path):
             after = http.get(whoami_url, headers=headers)
             assert after.status_code == 401, after.text
             assert after.json()["error"] == "invalid_nonce"
-            still = http.get(base + by_step["wba_upload"]["content_path"])
+            still = http.get(base + by_step["wba_publish"]["content_path"])
             assert still.status_code == 200
             assert still.json()["id"] == document["id"]
     finally:

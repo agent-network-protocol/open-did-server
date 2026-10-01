@@ -68,11 +68,13 @@ def main() -> None:
     _write_secret(out / "web-private.pem", private_key_pem(web_key))
     (out / "wba-did.json").write_text(json.dumps(wba, indent=2) + "\n", encoding="utf-8")
     (out / "web-did.json").write_text(json.dumps(web, indent=2) + "\n", encoding="utf-8")
+    _emit("wba_create", _created(wba))
+    _emit("web_create", _created(web))
 
     wba_meta = _publish(base, args.token, wba, wba_key)
     web_meta = _publish(base, args.token, web, web_key)
-    _emit("wba_upload", wba_meta)
-    _emit("web_upload", web_meta)
+    _emit("wba_publish", {**wba_meta, "published": True})
+    _emit("web_publish", {**web_meta, "published": True})
     wba_doc = _get_json(base + wba_meta["content_path"])
     web_doc = _get_json(base + web_meta["content_path"])
     if wba_doc["id"] != wba["id"] or web_doc["id"] != web["id"]:
@@ -148,6 +150,16 @@ def main() -> None:
                 "note": "Local HTTP and base_url_override are a development demo, not production HTTPS acceptance.",
             },
         )
+
+
+def _created(document: dict) -> dict:
+    """Public fields of a DID that exists only on the client so far."""
+    authentication = document.get("authentication") or []
+    return {
+        "did": document.get("id"),
+        "authentication": authentication[0] if authentication else None,
+        "published": False,
+    }
 
 
 def signed_publish(base: str, token: str, document: dict, key) -> tuple[int, dict]:

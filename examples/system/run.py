@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT / "examples" / "client"))
 import run as demo  # noqa: E402
 
 from open_did_server.identity import create_wba_identity, create_web_identity, private_key_pem, sign_headers
-from open_did_server.signatures import PROFILE_WHOAMI
+from open_did_server.signatures import PROFILE_ECHO, PROFILE_WHOAMI
 
 
 def main() -> None:
@@ -73,13 +73,24 @@ def main() -> None:
         ("wba", wba, wba_key, args.wba_handle),
         ("web", web, web_key, args.web_handle),
     ):
+        created = demo._created(document)
+        if not _report(
+            f"{label}-create",
+            created["did"] == document["id"] and bool(created["authentication"]),
+            id=created["did"],
+            authentication=created["authentication"],
+            published=False,
+        ):
+            failures += 1
+            continue
         status, uploaded = demo.signed_publish(base, args.token, document, key)
         uploaded_id = uploaded.get("did")
         if not _report(
-            f"{label}-upload",
+            f"{label}-publish",
             status == 201 and uploaded_id == document["id"],
             http=status,
             id=uploaded_id,
+            published=True,
         ):
             failures += 1
             continue
@@ -118,12 +129,46 @@ def main() -> None:
         whoami_url = f"{base}/examples/auth/whoami"
         headers = sign_headers(document, key, "GET", whoami_url, PROFILE_WHOAMI)
         whoami_status, whoami = demo.exchange("GET", whoami_url, None, headers)
+        authenticated = (
+            whoami_status == 200
+            and whoami.get("did") == document["id"]
+            and whoami.get("auth_scheme") == "http_signatures"
+        )
         if not _report(
             f"{label}-whoami",
-            whoami_status == 200 and whoami.get("did") == document["id"],
+            authenticated,
             http=whoami_status,
             did=whoami.get("did"),
-            matched=whoami.get("did") == document["id"],
+            auth_scheme=whoami.get("auth_scheme"),
+            authenticated=authenticated,
+        ):
+            failures += 1
+        echo_url = f"{base}/examples/auth/echo"
+        echo_body = demo._dumps({"hello": label})
+        echo_status, echo = demo.exchange(
+            "POST",
+            echo_url,
+            echo_body,
+            sign_headers(
+                document,
+                key,
+                "POST",
+                echo_url,
+                PROFILE_ECHO,
+                echo_body,
+                {"Content-Type": "application/json"},
+            ),
+        )
+        if not _report(
+            f"{label}-echo",
+            echo_status == 200
+            and echo.get("did") == document["id"]
+            and echo.get("auth_scheme") == "http_signatures"
+            and echo.get("body") == {"hello": label},
+            http=echo_status,
+            did=echo.get("did"),
+            auth_scheme=echo.get("auth_scheme"),
+            body=echo.get("body"),
         ):
             failures += 1
         if label == "wba":

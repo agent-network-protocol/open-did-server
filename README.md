@@ -44,14 +44,13 @@ uv run open-did-server serve
 
 ## 示例一：走完一次发布
 
-`examples/client/run.py` 是本地演示客户端。它会：
+`examples/client/run.py` 是本地演示客户端。它按这个顺序做三件事：
 
-1. 在 `--out` 生成一对 WBA E1 身份和一对 Web 身份（私钥只留在本机）。
-2. 用发布凭据和持钥签名上传两份文档。
-3. 按标准路径读回 `did.json`，核对返回的 `id` 等于上传的 DID。
-4. 绑定 Handle，并做正向、反向查询。
-5. 更新 WBA 文档（HTTP 签名之外，WBA 文档还有自己的 proof）。
-6. 对 whoami 和 echo 发签名请求。
+1. **创建 DID。** 在本机生成 WBA E1 和 Web 两份文档及认证私钥。私钥只写入 `--out`。这一步还没有访问服务，输出里 `published` 为 `false`。
+2. **发布 DID。** 用发布凭据和这份文档自己的认证私钥签名，把文档上传到服务。服务返回 201，`published` 变为 `true`，随后按标准路径读回的 `id` 必须等于刚创建的 DID。
+3. **用 DID 发起请求，由服务端做身份认证。** 客户端用同一把认证私钥签名 whoami 和 echo。服务端取出已发布文档里的公钥验签，确认键在 `authentication` 里，并通过时间窗口和重放检查。通过后响应里的 `did` 就是这个身份，`auth_scheme` 为 `http_signatures`。发布凭据不参与这两次请求。
+
+后面还会绑定 Handle、更新 WBA 文档。更新时 HTTP 签名不能代替文档自己的 proof。
 
 本地解析使用 SDK 的 `base_url_override`，输出里的 `resolution` 是 `development-demo`。这一步只说明「回环上的文档能被指到本地服务」，不是正式 HTTPS 验收。最后一行 `production_https` 在本地运行时是 `not-run`。
 
@@ -64,22 +63,24 @@ uv run python examples/client/run.py \
   --out ./data/demo
 ```
 
-每次运行都会新建密钥，所以 WBA 的指纹每次不同。下面是一次真实运行里能看出结果的几行（令牌和私钥没有出现在输出中）：
+每次运行都会新建密钥，所以 WBA 的指纹每次不同。下面是一次真实运行里创建、发布和身份认证的结果（令牌和私钥没有出现在输出中）：
 
 ```json
-{"step": "wba_document", "id": "did:wba:example.test:identities:wba:alice:e1_bR1sM4DO-B7JjbfxfhIkLwBA-Kpza0mHBRRfFpLVYak", "matched": true}
-{"step": "web_document", "id": "did:web:example.test:identities:web:bob", "matched": true}
-{"step": "wba_whoami", "did": "did:wba:example.test:identities:wba:alice:e1_bR1sM4DO-B7JjbfxfhIkLwBA-Kpza0mHBRRfFpLVYak", "auth_scheme": "http_signatures", "mode": "local-demo"}
+{"step": "wba_create", "did": "did:wba:example.test:identities:wba:alice:e1_yVcTuxpNpgAY3ufK98aR3lac0SrlwP56lTBIEy5E_2E", "authentication": "did:wba:example.test:identities:wba:alice:e1_yVcTuxpNpgAY3ufK98aR3lac0SrlwP56lTBIEy5E_2E#key-1", "published": false}
+{"step": "web_create", "did": "did:web:example.test:identities:web:bob", "authentication": "did:web:example.test:identities:web:bob#key-1", "published": false}
+{"step": "wba_publish", "did": "did:wba:example.test:identities:wba:alice:e1_yVcTuxpNpgAY3ufK98aR3lac0SrlwP56lTBIEy5E_2E", "published": true}
+{"step": "web_publish", "did": "did:web:example.test:identities:web:bob", "published": true}
+{"step": "wba_whoami", "did": "did:wba:example.test:identities:wba:alice:e1_yVcTuxpNpgAY3ufK98aR3lac0SrlwP56lTBIEy5E_2E", "auth_scheme": "http_signatures", "mode": "local-demo"}
+{"step": "wba_echo", "did": "did:wba:example.test:identities:wba:alice:e1_yVcTuxpNpgAY3ufK98aR3lac0SrlwP56lTBIEy5E_2E", "auth_scheme": "http_signatures", "mode": "local-demo", "body": {"hello": "wba"}}
 {"step": "web_whoami", "did": "did:web:example.test:identities:web:bob", "auth_scheme": "http_signatures", "mode": "local-demo"}
-{"step": "wba_resolve", "id": "did:wba:example.test:identities:wba:alice:e1_bR1sM4DO-B7JjbfxfhIkLwBA-Kpza0mHBRRfFpLVYak", "resolution": "development-demo", "base_url_override": "http://127.0.0.1:51595", "matched": true}
-{"step": "production_https", "status": "not-run", "note": "Local HTTP and base_url_override are a development demo, not production HTTPS acceptance."}
+{"step": "web_echo", "did": "did:web:example.test:identities:web:bob", "auth_scheme": "http_signatures", "mode": "local-demo", "body": {"hello": "web"}}
 ```
 
-`matched: true` 表示读回的文档 `id` 与上传的 DID 一致。`mode` 为 `local-demo` 表示这次服务开了本地演示开关。
+`wba_create` 和 `wba_publish` 的 `did` 相同，说明发布的就是刚创建的那一份。`wba_whoami` 的 `did` 再与它相同，并且 `auth_scheme` 为 `http_signatures`，说明服务端把这次请求认证成了该 DID。`wba_echo` 在同一次认证之后把签名正文原样返回。`mode` 为 `local-demo` 表示这次服务开了本地演示开关。
 
 ## 示例二：命名系统测试
 
-`examples/system/run.py` 把同一条发布路径拆成命名用例，并多做一次必须失败的重放。它复用示例一的上传和绑定请求，自己不再写第二套发布实现。HTTPS 时证书校验保持解释器默认值，解析文档时不使用 `base_url_override`。
+`examples/system/run.py` 把创建、发布和身份认证拆成命名用例，并多做一次必须失败的重放。发布和绑定复用示例一的请求，没有第二套实现。HTTPS 时证书校验保持解释器默认值，解析文档时不使用 `base_url_override`。
 
 先按上一节启动服务并创建覆盖 `identities/wba/alice`、`identities/web/bob`、`alice.example.test`、`bob.example.test` 的 grant。然后：
 
@@ -95,23 +96,29 @@ uv run python examples/system/run.py \
 
 | 用例 | 在检查什么 |
 |---|---|
-| `wba-upload` / `web-upload` | 上传返回 201，响应里的 DID 等于刚生成的文档 |
+| `wba-create` / `web-create` | 本地已经生成 DID 和 `authentication` 方法，尚未发布 |
+| `wba-publish` / `web-publish` | 发布返回 201，响应里的 DID 等于刚创建的那一份 |
 | `wba-read` / `web-read` | 标准 `did.json` 返回 200，且 `id` 等于上传的 DID |
 | `wba-handle` / `web-handle` | `GET /.well-known/handle/{local}` 返回 200、`status=active`，且 DID 一致 |
-| `wba-whoami` / `web-whoami` | 签名 whoami 返回 200，且 `did` 等于该文档 |
+| `wba-whoami` / `web-whoami` | 用该 DID 签名的 whoami 被服务端认证，返回同一个 `did` 和 `auth_scheme=http_signatures` |
+| `wba-echo` / `web-echo` | 用该 DID 签名的带正文请求被认证，服务端原样返回正文 |
 | `whoami-replay` | 同一条 whoami 签名再发一次，返回 401 `invalid_nonce` |
 
 下面是一次回环真实运行的完整输出。WBA 指纹每次新建密钥都会变；Web 的 `id`、各用例的 `result` 和 HTTP 状态是这次运行的结果：
 
 ```json
-{"case": "wba-upload", "result": "pass", "http": 201, "id": "did:wba:example.test:identities:wba:alice:e1_qqBxDPYx3AsyvFqO9hbiP30Lkfa1Th8XXkFDh9ErSFU"}
-{"case": "wba-read", "result": "pass", "http": 200, "id": "did:wba:example.test:identities:wba:alice:e1_qqBxDPYx3AsyvFqO9hbiP30Lkfa1Th8XXkFDh9ErSFU", "matched": true}
-{"case": "wba-handle", "result": "pass", "http": 200, "did": "did:wba:example.test:identities:wba:alice:e1_qqBxDPYx3AsyvFqO9hbiP30Lkfa1Th8XXkFDh9ErSFU", "status": "active", "matched": true}
-{"case": "wba-whoami", "result": "pass", "http": 200, "did": "did:wba:example.test:identities:wba:alice:e1_qqBxDPYx3AsyvFqO9hbiP30Lkfa1Th8XXkFDh9ErSFU", "matched": true}
-{"case": "web-upload", "result": "pass", "http": 201, "id": "did:web:example.test:identities:web:bob"}
+{"case": "wba-create", "result": "pass", "id": "did:wba:example.test:identities:wba:alice:e1_uGWK4THZWstV4AUJOgWLOZfMUpWCgd00bKwqp_LdlA4", "authentication": "did:wba:example.test:identities:wba:alice:e1_uGWK4THZWstV4AUJOgWLOZfMUpWCgd00bKwqp_LdlA4#key-1", "published": false}
+{"case": "wba-publish", "result": "pass", "http": 201, "id": "did:wba:example.test:identities:wba:alice:e1_uGWK4THZWstV4AUJOgWLOZfMUpWCgd00bKwqp_LdlA4", "published": true}
+{"case": "wba-read", "result": "pass", "http": 200, "id": "did:wba:example.test:identities:wba:alice:e1_uGWK4THZWstV4AUJOgWLOZfMUpWCgd00bKwqp_LdlA4", "matched": true}
+{"case": "wba-handle", "result": "pass", "http": 200, "did": "did:wba:example.test:identities:wba:alice:e1_uGWK4THZWstV4AUJOgWLOZfMUpWCgd00bKwqp_LdlA4", "status": "active", "matched": true}
+{"case": "wba-whoami", "result": "pass", "http": 200, "did": "did:wba:example.test:identities:wba:alice:e1_uGWK4THZWstV4AUJOgWLOZfMUpWCgd00bKwqp_LdlA4", "auth_scheme": "http_signatures", "authenticated": true}
+{"case": "wba-echo", "result": "pass", "http": 200, "did": "did:wba:example.test:identities:wba:alice:e1_uGWK4THZWstV4AUJOgWLOZfMUpWCgd00bKwqp_LdlA4", "auth_scheme": "http_signatures", "body": {"hello": "wba"}}
+{"case": "web-create", "result": "pass", "id": "did:web:example.test:identities:web:bob", "authentication": "did:web:example.test:identities:web:bob#key-1", "published": false}
+{"case": "web-publish", "result": "pass", "http": 201, "id": "did:web:example.test:identities:web:bob", "published": true}
 {"case": "web-read", "result": "pass", "http": 200, "id": "did:web:example.test:identities:web:bob", "matched": true}
 {"case": "web-handle", "result": "pass", "http": 200, "did": "did:web:example.test:identities:web:bob", "status": "active", "matched": true}
-{"case": "web-whoami", "result": "pass", "http": 200, "did": "did:web:example.test:identities:web:bob", "matched": true}
+{"case": "web-whoami", "result": "pass", "http": 200, "did": "did:web:example.test:identities:web:bob", "auth_scheme": "http_signatures", "authenticated": true}
+{"case": "web-echo", "result": "pass", "http": 200, "did": "did:web:example.test:identities:web:bob", "auth_scheme": "http_signatures", "body": {"hello": "web"}}
 {"case": "whoami-replay", "result": "rejected", "http": 401, "error": "invalid_nonce"}
 ```
 
