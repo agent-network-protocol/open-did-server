@@ -17,6 +17,7 @@ class Facts:
     revoked_grants: tuple[str, ...]
     stable_paths: dict[str, str]
     nonce_watermark: int = 0
+    replay_resume_after: int = 0
 
     def to_json(self) -> dict:
         return {
@@ -26,6 +27,7 @@ class Facts:
             "revoked_grants": list(self.revoked_grants),
             "stable_paths": dict(sorted(self.stable_paths.items())),
             "nonce_watermark": self.nonce_watermark,
+            "replay_resume_after": self.replay_resume_after,
         }
 
 
@@ -67,6 +69,49 @@ def satisfies(reference: Facts, current: Facts) -> bool:
     return structural_satisfies(reference, current) and replay_watermark_satisfied(reference, current)
 
 
+@dataclass(frozen=True)
+class Recovery:
+    structural_ok: bool
+    replay_behind: bool
+    resume_after: int
+    clearable: bool
+    watermark: int
+
+
+def decide_recovery(
+    reference: Facts | None,
+    current: Facts,
+    now: int,
+    ordinary_span: int,
+    replay_span: int,
+    sidecar_replay_resume_after: int = 0,
+) -> Recovery:
+    """Decide restore maintenance without reading SQLite.
+
+    A structural miss is never clearable by waiting. A nonce gap publishes
+    ``resume_after = max(sidecar deadline, now + replay_span)`` from this call's
+    clock. Startup persists that value. Clearing the gap is allowed only when
+    structural facts match and the previously stored deadline is already due.
+    The watermark to persist is the higher counter, never the restored database.
+    ``ordinary_span`` is the operator maintenance window and is not a replay clock.
+    """
+    if ordinary_span < 0 or replay_span < 0:
+        raise ValueError("maintenance span must be non-negative")
+    if reference is None:
+        return Recovery(True, False, 0, True, current.nonce_watermark)
+    structural_ok = structural_satisfies(reference, current)
+    replay_behind = current.nonce_watermark < reference.nonce_watermark
+    watermark = max(current.nonce_watermark, reference.nonce_watermark)
+    stored = sidecar_replay_resume_after if sidecar_replay_resume_after > 0 else 0
+    if replay_behind:
+        resume_after = max(stored, now + replay_span)
+        clearable = structural_ok and stored > 0 and now >= stored
+    else:
+        resume_after = 0
+        clearable = structural_ok
+    return Recovery(structural_ok, replay_behind, resume_after, clearable, watermark)
+
+
 def read_facts(path: str) -> Facts | None:
     if not os.path.exists(path):
         return None
@@ -77,9 +122,12 @@ def read_facts(path: str) -> Facts | None:
     generations = payload.get("generations") or {}
     stable = payload.get("stable_paths") or {}
     watermark = payload.get("nonce_watermark", 0)
+    resume_after = payload.get("replay_resume_after", 0)
     if not isinstance(generations, dict) or not isinstance(stable, dict):
         raise ValueError("high-water file is malformed")
     if isinstance(watermark, bool) or not isinstance(watermark, int) or watermark < 0:
+        raise ValueError("high-water file is malformed")
+    if isinstance(resume_after, bool) or not isinstance(resume_after, int) or resume_after < 0:
         raise ValueError("high-water file is malformed")
     return Facts(
         generations={str(key): str(value) for key, value in generations.items()},
@@ -87,6 +135,7 @@ def read_facts(path: str) -> Facts | None:
         revoked_grants=tuple(str(item) for item in payload.get("revoked_grants") or []),
         stable_paths={str(key): str(value) for key, value in stable.items()},
         nonce_watermark=watermark,
+        replay_resume_after=resume_after,
     )
 
 

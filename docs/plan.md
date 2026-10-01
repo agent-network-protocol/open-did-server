@@ -17,7 +17,7 @@ P0 仍以 `458b842` 的方案为准。P1 至 P4 的代码、测试、客户端�
 - 受信代理重建 `https://did.example.test/...`，以及 `PUBLIC_DID_PORT=8443` 时 DID 带端口、Handle URL 不带端口。
 - 独立客户端进程 `examples/client/run.py`。文档解析使用 `base_url_override`，记录为 development demo。
 - 用手写签名基串和固定摘要 `sha-256=:pY6BR0NZSvSfPExR0TrlXPyGrAwda96+tKyvsnJWEpk=:` 验证 echo。该基串不是 `generate_http_signature_headers` 生成的。调换参数顺序后服务返回 401。
-- 用旧数据库覆盖已前进的高水位事实后，服务进入维护。等到签名窗口结束，`clear-maintenance` 仍然不会补回丢失的 tombstone、稳定路径或已撤销 grant。只丢掉已消费 nonce、其余事实仍匹配时，同样进入维护；这个窗口比普通维护多一个时钟偏差再加 1 秒，窗口内不能重放，窗口结束后丢掉的 nonce 已过期，才可以清除这一项。结构事实和 nonce 水位同时落后时，先补回 grant 或其他结构事实也不会改用较短窗口，在较长窗口结束前不会把 `nonce_watermark` 写低。
+- 用旧数据库覆盖已前进的高水位事实后，服务进入维护。等到签名窗口结束，`clear-maintenance` 仍然不会补回丢失的 tombstone、稳定路径或已撤销 grant。只丢掉已消费 nonce、其余事实仍匹配时，同样进入维护。重放截止时间写在高水位文件里，按发现落后的那次时钟计算，比普通维护多一个时钟偏差再加 1 秒。数据库里更早一次维护的开始时间不会提前打开认证，也不会把 `nonce_watermark` 写低；窗口结束后是把数据库水位抬到文件里的值。进程在水位仍超前时再次启动，会把截止时间从新的时钟向前推。
 - 正式模式的 WBA HTTPS 解引用发生在绑定事务提交并释放写锁之后。创建和状态更新都能因此读到新 generation。这项顺序由测试中的替身响应证明，不是公网验收。
 
 未执行，不能写成通过：

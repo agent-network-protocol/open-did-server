@@ -21,7 +21,7 @@ from open_did_server.canonical import canonical_url_for_http_path, decode_segmen
 from open_did_server.config import Settings
 from open_did_server.documents import RESERVED_HANDLES, declaration_satisfies, validate_document
 from open_did_server.errors import ApiError, auth_error
-from open_did_server.highwater import EMPTY, read_facts, structural_satisfies, write_facts
+from open_did_server.highwater import EMPTY, Facts, decide_recovery, read_facts, write_facts
 from open_did_server.jsonutil import parse_json_object
 from open_did_server.signatures import (
     PROFILE_CREATE,
@@ -152,28 +152,37 @@ class Service:
         try:
             reference = read_facts(self.settings.high_water_path)
         except ValueError as exc:
-            self._enter_maintenance(str(exc), refresh=False)
+            self._hold_maintenance(str(exc))
             return str(exc)
         if reference is None:
             if _facts_empty(current):
                 write_facts(self.settings.high_water_path, current)
                 return self._maintenance_reason()
             reason = "high-water file is missing for a non-empty database"
-            self._enter_maintenance(reason, refresh=False)
+            self._hold_maintenance(reason)
             return reason
-        structural_ok = structural_satisfies(reference, current)
-        replay_ok = current.nonce_watermark >= reference.nonce_watermark
-        if not structural_ok:
-            reason = "database is behind the high-water file"
-            # A missing grant must not select the shorter window while consumed
-            # nonces are also gone. The replay horizon stays in force until both are safe.
-            self._enter_maintenance(reason, refresh=False, replay_gap=not replay_ok)
+        decision = decide_recovery(
+            reference,
+            current,
+            self.clock(),
+            self._ordinary_span(),
+            self._replay_span(),
+            reference.replay_resume_after,
+        )
+        if not decision.structural_ok or decision.replay_behind:
+            reason = (
+                "database is behind the high-water file"
+                if not decision.structural_ok
+                else "replay watermark is ahead of the database"
+            )
+            self._hold_maintenance(reason)
+            if decision.replay_behind:
+                self._persist_replay(reference, decision.watermark, decision.resume_after)
             return reason
-        if not replay_ok:
-            reason = "replay watermark is ahead of the database"
-            self._enter_maintenance(reason, refresh=True, replay_gap=True)
-            return reason
-        write_facts(self.settings.high_water_path, current)
+        write_facts(
+            self.settings.high_water_path,
+            _facts_with_replay(current, decision.watermark, 0),
+        )
         return self._maintenance_reason()
 
     def create_grant(
@@ -260,27 +269,48 @@ class Service:
         return suspended
 
     def mark_maintenance(self, reason: str) -> None:
-        self._enter_maintenance(reason or "operator maintenance", refresh=True)
+        """Refresh the ordinary operator window without moving a sidecar replay deadline."""
+        with self.store.immediate() as connection:
+            self.store.meta_set(connection, "maintenance", "1")
+            self.store.meta_set(connection, "maintenance_reason", reason or "operator maintenance")
+            self.store.meta_set(connection, "auth_resume_after", str(self.clock() + self._ordinary_span()))
 
     def clear_maintenance(self) -> None:
         current = self._facts()
         reference = read_facts(self.settings.high_water_path)
-        if reference is None or not structural_satisfies(reference, current):
+        if reference is None:
+            raise ApiError(409, "maintenance", "High-water file is missing")
+        decision = decide_recovery(
+            reference,
+            current,
+            self.clock(),
+            self._ordinary_span(),
+            self._replay_span(),
+            reference.replay_resume_after,
+        )
+        if not decision.structural_ok:
             raise ApiError(
                 409,
                 "maintenance",
                 "High-water facts are not satisfied. Waiting does not restore missing ownership or tombstones.",
             )
-        replay_behind = current.nonce_watermark < reference.nonce_watermark
-        if replay_behind:
-            self._ensure_replay_horizon()
+        if decision.replay_behind:
+            if reference.replay_resume_after <= 0 or self.clock() < reference.replay_resume_after:
+                raise ApiError(
+                    409,
+                    "maintenance",
+                    "Authentication must stay in maintenance until the signature window has elapsed",
+                )
+            with self.store.immediate() as connection:
+                self.store.meta_set(connection, "nonce_watermark", str(decision.watermark))
+                self.store.meta_set(connection, "maintenance", "0")
+                raised = self.store.facts(connection)
+            write_facts(self.settings.high_water_path, _facts_with_replay(raised, decision.watermark, 0))
+            return
         with self.store.immediate() as connection:
             if not self.store.maintenance(connection):
                 return
             resume = int(self.store.meta_get(connection, "auth_resume_after") or "0")
-            if replay_behind:
-                started = int(self.store.meta_get(connection, "maintenance_started_at") or "0")
-                resume = max(resume, started + self._replay_span())
             if self.clock() < resume:
                 raise ApiError(
                     409,
@@ -288,8 +318,7 @@ class Service:
                     "Authentication must stay in maintenance until the signature window has elapsed",
                 )
             self.store.meta_set(connection, "maintenance", "0")
-            self.store.meta_set(connection, "replay_gap", "0")
-        write_facts(self.settings.high_water_path, current)
+        write_facts(self.settings.high_water_path, _facts_with_replay(current, decision.watermark, 0))
 
     def health(self) -> Result:
         connection = self.store.connect()
@@ -1058,20 +1087,35 @@ class Service:
         with self._high_water_lock:
             current = self._facts()
             reference = read_facts(self.settings.high_water_path)
-            structural_bad = reference is not None and not structural_satisfies(reference, current)
-            replay_bad = reference is not None and current.nonce_watermark < reference.nonce_watermark
-            if structural_bad or replay_bad:
+            if reference is None:
+                if _facts_empty(current):
+                    write_facts(self.settings.high_water_path, current)
+                return
+            decision = decide_recovery(
+                reference,
+                current,
+                self.clock(),
+                self._ordinary_span(),
+                self._replay_span(),
+                reference.replay_resume_after,
+            )
+            if not decision.structural_ok or decision.replay_behind:
                 reason = (
                     "database is behind the high-water file"
-                    if structural_bad
+                    if not decision.structural_ok
                     else "replay watermark is ahead of the database"
                 )
-                self._enter_maintenance(reason, refresh=False, replay_gap=replay_bad)
+                self._hold_maintenance(reason)
+                if decision.replay_behind and reference.replay_resume_after <= 0:
+                    self._persist_replay(reference, decision.watermark, decision.resume_after)
                 return
             latest = read_facts(self.settings.high_water_path)
             if latest is not None and latest.nonce_watermark > current.nonce_watermark:
                 return
-            write_facts(self.settings.high_water_path, current)
+            write_facts(
+                self.settings.high_water_path,
+                _facts_with_replay(current, decision.watermark, 0),
+            )
 
     def _ordinary_span(self) -> int:
         return self.settings.signature_lifetime + self.settings.clock_skew
@@ -1082,41 +1126,17 @@ class Service:
         # covers the strict `expires < now - skew` boundary.
         return self._ordinary_span() + self.settings.clock_skew + 1
 
-    def _ensure_replay_horizon(self) -> None:
-        """Commit the longer replay deadline before a clear attempt can roll back."""
+    def _hold_maintenance(self, reason: str) -> None:
+        """Stop authentication writes. The replay deadline stays in the sidecar."""
         with self.store.immediate() as connection:
-            started_raw = self.store.meta_get(connection, "maintenance_started_at")
-            if started_raw is None:
-                started = self.clock()
-                self.store.meta_set(connection, "maintenance_started_at", str(started))
-            else:
-                started = int(started_raw)
-            required = started + self._replay_span()
-            existing = int(self.store.meta_get(connection, "auth_resume_after") or "0")
-            if existing < required:
-                self.store.meta_set(connection, "auth_resume_after", str(required))
-            self.store.meta_set(connection, "replay_gap", "1")
-
-    def _enter_maintenance(self, reason: str, *, refresh: bool, replay_gap: bool = False) -> None:
-        with self.store.immediate() as connection:
-            already = self.store.maintenance(connection)
-            prior_gap = self.store.meta_get(connection, "replay_gap") == "1"
-            use_gap = replay_gap or prior_gap
             self.store.meta_set(connection, "maintenance", "1")
             self.store.meta_set(connection, "maintenance_reason", reason)
-            self.store.meta_set(connection, "replay_gap", "1" if use_gap else "0")
-            started_raw = self.store.meta_get(connection, "maintenance_started_at")
-            resume_raw = self.store.meta_get(connection, "auth_resume_after")
-            existing = int(resume_raw) if resume_raw is not None else None
-            if refresh or not already or started_raw is None:
-                started = self.clock()
-            else:
-                started = int(started_raw)
-            target = started + (self._replay_span() if use_gap else self._ordinary_span())
-            if not refresh and existing is not None and existing > target:
-                target = existing
-            self.store.meta_set(connection, "maintenance_started_at", str(started))
-            self.store.meta_set(connection, "auth_resume_after", str(target))
+
+    def _persist_replay(self, reference, watermark: int, resume_after: int) -> None:
+        write_facts(
+            self.settings.high_water_path,
+            _facts_with_replay(reference, watermark, resume_after),
+        )
 
     def _maintenance_reason(self) -> str | None:
         connection = self.store.connect()
@@ -1176,6 +1196,17 @@ class Service:
             """,
             (local_part, handle, did, old_status, new_status, generation, reason, now),
         )
+
+
+def _facts_with_replay(facts: Facts, watermark: int, resume_after: int) -> Facts:
+    return Facts(
+        facts.generations,
+        facts.tombstones,
+        facts.revoked_grants,
+        facts.stable_paths,
+        nonce_watermark=watermark,
+        replay_resume_after=resume_after,
+    )
 
 
 def _facts_empty(facts) -> bool:
