@@ -161,11 +161,15 @@ class Service:
             reason = "high-water file is missing for a non-empty database"
             self._enter_maintenance(reason, refresh=False)
             return reason
-        if not structural_satisfies(reference, current):
+        structural_ok = structural_satisfies(reference, current)
+        replay_ok = current.nonce_watermark >= reference.nonce_watermark
+        if not structural_ok:
             reason = "database is behind the high-water file"
-            self._enter_maintenance(reason, refresh=False)
+            # A missing grant must not select the shorter window while consumed
+            # nonces are also gone. The replay horizon stays in force until both are safe.
+            self._enter_maintenance(reason, refresh=False, replay_gap=not replay_ok)
             return reason
-        if current.nonce_watermark < reference.nonce_watermark:
+        if not replay_ok:
             reason = "replay watermark is ahead of the database"
             self._enter_maintenance(reason, refresh=True, replay_gap=True)
             return reason
@@ -267,10 +271,16 @@ class Service:
                 "maintenance",
                 "High-water facts are not satisfied. Waiting does not restore missing ownership or tombstones.",
             )
+        replay_behind = current.nonce_watermark < reference.nonce_watermark
+        if replay_behind:
+            self._ensure_replay_horizon()
         with self.store.immediate() as connection:
             if not self.store.maintenance(connection):
                 return
             resume = int(self.store.meta_get(connection, "auth_resume_after") or "0")
+            if replay_behind:
+                started = int(self.store.meta_get(connection, "maintenance_started_at") or "0")
+                resume = max(resume, started + self._replay_span())
             if self.clock() < resume:
                 raise ApiError(
                     409,
@@ -278,6 +288,7 @@ class Service:
                     "Authentication must stay in maintenance until the signature window has elapsed",
                 )
             self.store.meta_set(connection, "maintenance", "0")
+            self.store.meta_set(connection, "replay_gap", "0")
         write_facts(self.settings.high_water_path, current)
 
     def health(self) -> Result:
@@ -1047,34 +1058,65 @@ class Service:
         with self._high_water_lock:
             current = self._facts()
             reference = read_facts(self.settings.high_water_path)
-            if reference is not None and not structural_satisfies(reference, current):
-                self._enter_maintenance("database is behind the high-water file", refresh=False)
-                return
-            if reference is not None and current.nonce_watermark < reference.nonce_watermark:
-                self._enter_maintenance(
-                    "replay watermark is ahead of the database",
-                    refresh=False,
-                    replay_gap=True,
+            structural_bad = reference is not None and not structural_satisfies(reference, current)
+            replay_bad = reference is not None and current.nonce_watermark < reference.nonce_watermark
+            if structural_bad or replay_bad:
+                reason = (
+                    "database is behind the high-water file"
+                    if structural_bad
+                    else "replay watermark is ahead of the database"
                 )
+                self._enter_maintenance(reason, refresh=False, replay_gap=replay_bad)
                 return
             latest = read_facts(self.settings.high_water_path)
             if latest is not None and latest.nonce_watermark > current.nonce_watermark:
                 return
             write_facts(self.settings.high_water_path, current)
 
+    def _ordinary_span(self) -> int:
+        return self.settings.signature_lifetime + self.settings.clock_skew
+
+    def _replay_span(self) -> int:
+        # A consumed signature may have been created one skew in the future and
+        # remains acceptable until expires plus another skew. The extra second
+        # covers the strict `expires < now - skew` boundary.
+        return self._ordinary_span() + self.settings.clock_skew + 1
+
+    def _ensure_replay_horizon(self) -> None:
+        """Commit the longer replay deadline before a clear attempt can roll back."""
+        with self.store.immediate() as connection:
+            started_raw = self.store.meta_get(connection, "maintenance_started_at")
+            if started_raw is None:
+                started = self.clock()
+                self.store.meta_set(connection, "maintenance_started_at", str(started))
+            else:
+                started = int(started_raw)
+            required = started + self._replay_span()
+            existing = int(self.store.meta_get(connection, "auth_resume_after") or "0")
+            if existing < required:
+                self.store.meta_set(connection, "auth_resume_after", str(required))
+            self.store.meta_set(connection, "replay_gap", "1")
+
     def _enter_maintenance(self, reason: str, *, refresh: bool, replay_gap: bool = False) -> None:
         with self.store.immediate() as connection:
             already = self.store.maintenance(connection)
+            prior_gap = self.store.meta_get(connection, "replay_gap") == "1"
+            use_gap = replay_gap or prior_gap
             self.store.meta_set(connection, "maintenance", "1")
             self.store.meta_set(connection, "maintenance_reason", reason)
-            if refresh or not already or self.store.meta_get(connection, "auth_resume_after") is None:
-                # A consumed signature may have been created one skew in the future and
-                # remains acceptable until expires plus another skew. The replay gap waits
-                # that whole horizon so clearing maintenance cannot revive it.
-                span = self.settings.signature_lifetime + self.settings.clock_skew
-                if replay_gap:
-                    span += self.settings.clock_skew + 1
-                self.store.meta_set(connection, "auth_resume_after", str(self.clock() + span))
+            self.store.meta_set(connection, "replay_gap", "1" if use_gap else "0")
+            started_raw = self.store.meta_get(connection, "maintenance_started_at")
+            resume_raw = self.store.meta_get(connection, "auth_resume_after")
+            existing = int(resume_raw) if resume_raw is not None else None
+            if refresh or not already or started_raw is None:
+                started = self.clock()
+            else:
+                started = int(started_raw)
+            target = started + (self._replay_span() if use_gap else self._ordinary_span())
+            if not refresh and existing is not None and existing > target:
+                target = existing
+            self.store.meta_set(connection, "maintenance_started_at", str(started))
+            self.store.meta_set(connection, "auth_resume_after", str(target))
 
     def _maintenance_reason(self) -> str | None:
         connection = self.store.connect()
