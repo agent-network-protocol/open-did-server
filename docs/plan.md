@@ -19,7 +19,7 @@ P0 仍以 `458b842` 的方案为准。P1 至 P4 的代码、测试、客户端�
 - 独立进程 `examples/system/run.py` 在回环上报告 WBA/Web 上传、标准文档 `id` 一致、Handle 查询、whoami，以及同一签名重放被拒绝。
 - 2026-10-01 临时把 `rwiki.cn` 的 apex 443 反代到独立数据目录上的本服务（`LOCAL_DEMO_MODE=0`，签名 URL 为 `https://rwiki.cn/...`，证书校验保持默认，没有使用 `base_url_override`）。同一系统测试示例在该 HTTPS 地址上得到与回环相同的通过和重放拒绝结果；标准文档响应体里的 `id` 等于上传的 DID，whoami 返回该 DID。验收前保存的 `/etc/nginx/conf.d/rwiki.cn.conf` 已写回。恢复后 `GET https://rwiki.cn/` 仍是 `{"environment":"rwiki","domain":"rwiki.cn","ok":true}`，临时测试文档路径返回 404。没有修改或重启 `awiki.info`。
 - 用手写签名基串和固定摘要 `sha-256=:pY6BR0NZSvSfPExR0TrlXPyGrAwda96+tKyvsnJWEpk=:` 验证 echo。该基串不是 `generate_http_signature_headers` 生成的。调换参数顺序后服务返回 401。
-- 用旧数据库覆盖已前进的高水位事实后，服务进入维护。等到签名窗口结束，`clear-maintenance` 仍然不会补回丢失的 tombstone、稳定路径或已撤销 grant。只丢掉已消费 nonce、其余事实仍匹配时，同样进入维护。重放截止时间写在高水位文件里，按发现落后的那次时钟计算，比普通维护多一个时钟偏差再加 1 秒。数据库里更早一次维护的开始时间不会提前打开认证，也不会把 `nonce_watermark` 写低；窗口结束后是把数据库水位抬到文件里的值。进程在水位仍超前时再次启动，会把截止时间从新的时钟向前推。
+- 用旧数据库覆盖已前进的高水位事实后，服务进入维护。等到签名窗口结束，`clear-maintenance` 仍然不会补回丢失的 tombstone、稳定路径或已撤销 grant。只丢掉已消费 nonce、其余事实仍匹配时，同样进入维护。重放截止时间写在高水位文件里，按发现落后的那次时钟计算，比普通维护多一个时钟偏差再加 1 秒。数据库里更早一次维护的开始时间不会提前打开认证，也不会把 `nonce_watermark` 写低；窗口结束后是把数据库水位抬到文件里的值。`serve` 进程在水位仍超前时再次启动，会把截止时间从新的时钟向前推。管理命令不会改写已经写下的截止时间。
 - 正式模式的 WBA HTTPS 解引用发生在绑定事务提交并释放写锁之后。创建和状态更新都能因此读到新 generation。这项顺序由测试中的替身响应证明，不是公网验收。
 
 不能写成持续通过：

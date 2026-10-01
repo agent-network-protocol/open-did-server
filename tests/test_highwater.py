@@ -8,8 +8,10 @@ from pathlib import Path
 
 import httpx
 
+from open_did_server.cli import main
+from open_did_server.config import load_settings
 from open_did_server.errors import ApiError
-from open_did_server.highwater import Facts, decide_recovery, read_facts
+from open_did_server.highwater import Facts, decide_recovery, read_facts, write_facts
 from open_did_server.identity import sign_headers
 from open_did_server.service import Service
 from open_did_server.signatures import PROFILE_WHOAMI
@@ -359,3 +361,62 @@ def test_structural_and_nonce_gap_keeps_the_replay_horizon():
         assert after.json()["error"] == "invalid_timestamp"
     finally:
         http.stop()
+
+
+def _admin_env(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OPEN_DID_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("LOCAL_DEMO_MODE", "1")
+    monkeypatch.setenv("PUBLIC_DID_DOMAIN", "example.test")
+    monkeypatch.setenv("REQUEST_BASE_URL", "http://127.0.0.1:9")
+    monkeypatch.delenv("DID_RESOLUTION_BASE_URL_OVERRIDE", raising=False)
+
+
+def test_admin_cli_does_not_slide_the_replay_deadline(monkeypatch, tmp_path: Path) -> None:
+    """clear-maintenance must honor the stored deadline instead of refreshing it."""
+    _admin_env(monkeypatch, tmp_path)
+    settings = load_settings()
+    Store(settings.database_path).init()
+    now = int(time.time())
+    pending = now + 30
+    write_facts(
+        settings.high_water_path,
+        Facts({}, (), (), {}, nonce_watermark=5, replay_resume_after=pending),
+    )
+
+    main(["mark-maintenance", "--reason", "operator"])
+    assert read_facts(settings.high_water_path).replay_resume_after == pending
+
+    try:
+        main(["clear-maintenance"])
+    except SystemExit as exc:
+        assert exc.code == 1
+    else:
+        raise AssertionError("clear-maintenance succeeded before the stored deadline")
+    assert read_facts(settings.high_water_path).replay_resume_after == pending
+    assert read_facts(settings.high_water_path).nonce_watermark == 5
+
+    Service(settings, Store(settings.database_path)).startup()
+    extended = read_facts(settings.high_water_path).replay_resume_after
+    span = settings.signature_lifetime + (2 * settings.clock_skew) + 1
+    assert extended >= int(time.time()) + span - 2
+    assert extended > pending
+
+    elapsed = int(time.time()) - 30
+    write_facts(
+        settings.high_water_path,
+        Facts({}, (), (), {}, nonce_watermark=5, replay_resume_after=elapsed),
+    )
+    main(["clear-maintenance"])
+    cleared = read_facts(settings.high_water_path)
+    assert cleared is not None
+    assert cleared.replay_resume_after == 0
+    assert cleared.nonce_watermark == 5
+    with sqlite3.connect(settings.database_path) as connection:
+        stored = connection.execute(
+            "SELECT value FROM meta WHERE key = 'nonce_watermark'"
+        ).fetchone()
+        maintenance = connection.execute(
+            "SELECT value FROM meta WHERE key = 'maintenance'"
+        ).fetchone()
+    assert stored is not None and int(stored[0]) == 5
+    assert maintenance is not None and maintenance[0] == "0"

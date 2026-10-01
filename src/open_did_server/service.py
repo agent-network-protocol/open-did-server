@@ -145,8 +145,13 @@ class Service:
         self.clock = clock or (lambda: int(time.time()))
         self._high_water_lock = threading.Lock()
 
-    def startup(self) -> str | None:
-        """Reconcile the sidecar. Return a maintenance reason when service writes must stop."""
+    def startup(self, *, extend_replay: bool = True) -> str | None:
+        """Reconcile the sidecar. Return a maintenance reason when service writes must stop.
+
+        A serving process extends a replay deadline that is still ahead. Admin
+        commands pass ``extend_replay=False`` and leave an already stored
+        deadline unchanged.
+        """
         self.store.init()
         current = self._facts()
         try:
@@ -176,7 +181,7 @@ class Service:
                 else "replay watermark is ahead of the database"
             )
             self._hold_maintenance(reason)
-            if decision.replay_behind:
+            if decision.replay_behind and extend_replay:
                 self._persist_replay(reference, decision.watermark, decision.resume_after)
             return reason
         write_facts(

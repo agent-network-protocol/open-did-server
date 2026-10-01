@@ -48,7 +48,8 @@ def main(argv: list[str] | None = None) -> None:
             _serve(settings)
             return
         service = Service(settings, Store(settings.database_path))
-        service.startup()
+        # Serving is the only command that may slide an existing replay deadline.
+        service.startup(extend_replay=False)
         if args.command == "init":
             print(f"initialized {settings.database_path}")
         elif args.command == "create-grant":
