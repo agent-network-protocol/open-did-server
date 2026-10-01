@@ -153,11 +153,19 @@ class Store:
             str(row["stable_path_key"]): str(row["owner_id"])
             for row in connection.execute("SELECT stable_path_key, owner_id FROM stable_subject_paths")
         }
+        raw_watermark = self.meta_get(connection, "nonce_watermark") or "0"
+        try:
+            watermark = int(raw_watermark)
+        except ValueError as exc:
+            raise ValueError("nonce watermark is malformed") from exc
+        if watermark < 0:
+            raise ValueError("nonce watermark is malformed")
         return Facts(
             generations=generations,
             tombstones=tuple(sorted(tombstones)),
             revoked_grants=tuple(sorted(revoked)),
             stable_paths=stable,
+            nonce_watermark=watermark,
         )
 
 

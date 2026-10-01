@@ -46,7 +46,7 @@ SDK 的 `verify_handle_binding` 不会去读取 `serviceEndpoint`，WBA 域名�
 | 文件 | 内容 |
 |---|---|
 | `server.db` | 文档原文、Handle、grant 摘要、nonce、维护标记 |
-| `high-water.json` | Handle generation、revoked tombstone、已撤销 grant、WBA 稳定路径归属 |
+| `high-water.json` | Handle generation、revoked tombstone、已撤销 grant、WBA 稳定路径归属、只增的 `nonce_watermark` |
 
 高水位文件不放进 SQLite 快照。进程在改变这些事实并提交之后更新它。启动时：
 
@@ -54,13 +54,13 @@ SDK 的 `verify_handle_binding` 不会去读取 `serviceEndpoint`，WBA 域名�
 - 数据库已有数据但高水位文件缺失，或文件里有一条数据库满足不了的事实：进入维护。公开 `did.json` 仍可读。名称、写入、whoami 和 echo 返回 503。
 - 数据库包含文件里的全部事实，只是可能更新：把文件快进到数据库，不因此自动结束已有的维护窗口。
 
-`clear-maintenance` 要同时满足两点：当前时间已经到达进入维护时记下的签名窗口终点（寿命 300 秒加偏差 30 秒，共 330 秒），以及高水位事实都能在数据库里找到。只等待不能补回丢失的路径归属、tombstone 或已撤销 grant。
+`clear-maintenance` 要同时满足两点：当前时间已经到达进入维护时记下的终点，以及 generation、tombstone、已撤销 grant 和稳定路径都能在数据库里找到。普通维护终点是签名寿命加一个时钟偏差（330 秒）。只缺少 nonce 水位时，终点是寿命加两倍偏差再加 1 秒。只等待不能补回丢失的路径归属、tombstone 或已撤销 grant。
 
 恢复时的限制：
 
-- 只恢复旧的 `server.db`、留下较新的高水位文件：服务保持维护，直到数据库重新包含那些 generation、tombstone、撤销 grant 和稳定路径。这是故意的，用来挡住“用旧快照复活已撤销名称或凭据”。
-- 两份文件一起恢复到同一个旧时间点：服务看不出回退。首版没有独立的分布式日志。
-- nonce 不在高水位文件里。只恢复数据库会把有效窗口内的重放记录一起退回去。维护窗口的作用是挡住进入维护之前已经发出、仍可能被重放的签名；它不能弥补两份文件一起回退。
+- 只恢复旧的 `server.db`、留下较新的高水位文件：服务保持维护，直到数据库重新包含那些 generation、tombstone、撤销 grant 和稳定路径。这是故意的，用来挡住用旧快照复活已撤销名称或凭据。
+- 高水位里的 `nonce_watermark` 只增不减，每次成功消费的签名都加一。只恢复旧数据库、留下较新的水位时，服务进入维护。被接受的签名最多可以比服务器时钟超前一个偏差，并且在 `expires` 之后再保留一个偏差，所以这个窗口比普通维护更长。窗口结束前不会打开认证。窗口结束后，丢掉的 nonce 已经不能再被接受，这时可以清除这一项。进程在水位仍然超前时重新启动，会从当前时刻重新计算这个窗口。
+- 两份文件一起恢复到同一个旧时间点时，水位也一起退回，服务看不出重放记录被回退。首版没有独立的分布式日志。
 - `revoked` Handle 和已撤销 grant 在当前库里不能恢复。稳定主体路径不会分给第二个指纹 DID。
 - 复制 SQLite 文件前先执行 `PRAGMA wal_checkpoint(TRUNCATE)`，并不要留下另一个时间点的 `-wal` / `-shm`，否则看起来被换掉的库仍会从 WAL 里放出较新的写入。
 - 首版是单进程。多个 worker 需要共享的重放存储，不能各带一份内存 nonce。

@@ -27,8 +27,8 @@ class Running:
 
 
 class _Server:
-    def __init__(self, settings: Settings) -> None:
-        self.app = create_app(settings)
+    def __init__(self, settings: Settings, clock=None) -> None:
+        self.app = create_app(settings, clock=clock)
         self.config = uvicorn.Config(
             self.app,
             host="127.0.0.1",
@@ -81,7 +81,8 @@ def make_settings(tmp: Path, port: int, **overrides) -> Settings:
 
 
 class started:
-    def __init__(self, **overrides) -> None:
+    def __init__(self, clock=None, **overrides) -> None:
+        self.clock = clock
         self.overrides = overrides
         self.server: _Server | None = None
         self.client: httpx.Client | None = None
@@ -90,9 +91,9 @@ class started:
     def __enter__(self) -> Running:
         port = free_port()
         settings = make_settings(self.tmp, port, **self.overrides)
-        service = Service(settings, Store(settings.database_path))
+        service = Service(settings, Store(settings.database_path), clock=self.clock)
         service.startup()
-        self.server = _Server(settings)
+        self.server = _Server(settings, clock=self.clock)
         self.server.start()
         self.client = httpx.Client(trust_env=False, timeout=10)
         return Running(f"http://127.0.0.1:{port}", settings, self.client, service, self.tmp)

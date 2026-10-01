@@ -16,6 +16,7 @@ class Facts:
     tombstones: tuple[str, ...]
     revoked_grants: tuple[str, ...]
     stable_paths: dict[str, str]
+    nonce_watermark: int = 0
 
     def to_json(self) -> dict:
         return {
@@ -24,6 +25,7 @@ class Facts:
             "tombstones": list(self.tombstones),
             "revoked_grants": list(self.revoked_grants),
             "stable_paths": dict(sorted(self.stable_paths.items())),
+            "nonce_watermark": self.nonce_watermark,
         }
 
 
@@ -34,8 +36,8 @@ def _canonical_generation(value: str) -> int:
     return int(canonicalize_binding_generation(value))
 
 
-def satisfies(reference: Facts, current: Facts) -> bool:
-    """Return whether every sidecar fact is still present in the database."""
+def structural_satisfies(reference: Facts, current: Facts) -> bool:
+    """Return whether generations, tombstones, revoked grants, and stable paths remain."""
     try:
         for handle, generation in reference.generations.items():
             actual = current.generations.get(handle)
@@ -55,6 +57,16 @@ def satisfies(reference: Facts, current: Facts) -> bool:
     return True
 
 
+def replay_watermark_satisfied(reference: Facts, current: Facts) -> bool:
+    """Return whether the database still contains every consumed replay nonce generation."""
+    return current.nonce_watermark >= reference.nonce_watermark
+
+
+def satisfies(reference: Facts, current: Facts) -> bool:
+    """Return whether every sidecar fact is still present in the database."""
+    return structural_satisfies(reference, current) and replay_watermark_satisfied(reference, current)
+
+
 def read_facts(path: str) -> Facts | None:
     if not os.path.exists(path):
         return None
@@ -64,13 +76,17 @@ def read_facts(path: str) -> Facts | None:
         raise ValueError("high-water file is not version 1")
     generations = payload.get("generations") or {}
     stable = payload.get("stable_paths") or {}
+    watermark = payload.get("nonce_watermark", 0)
     if not isinstance(generations, dict) or not isinstance(stable, dict):
+        raise ValueError("high-water file is malformed")
+    if isinstance(watermark, bool) or not isinstance(watermark, int) or watermark < 0:
         raise ValueError("high-water file is malformed")
     return Facts(
         generations={str(key): str(value) for key, value in generations.items()},
         tombstones=tuple(str(item) for item in payload.get("tombstones") or []),
         revoked_grants=tuple(str(item) for item in payload.get("revoked_grants") or []),
         stable_paths={str(key): str(value) for key, value in stable.items()},
+        nonce_watermark=watermark,
     )
 
 

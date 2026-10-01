@@ -17,7 +17,8 @@ P0 仍以 `458b842` 的方案为准。P1 至 P4 的代码、测试、客户端�
 - 受信代理重建 `https://did.example.test/...`，以及 `PUBLIC_DID_PORT=8443` 时 DID 带端口、Handle URL 不带端口。
 - 独立客户端进程 `examples/client/run.py`。文档解析使用 `base_url_override`，记录为 development demo。
 - 用手写签名基串和固定摘要 `sha-256=:pY6BR0NZSvSfPExR0TrlXPyGrAwda96+tKyvsnJWEpk=:` 验证 echo。该基串不是 `generate_http_signature_headers` 生成的。调换参数顺序后服务返回 401。
-- 用旧数据库覆盖已前进的高水位事实后，服务进入维护，`clear-maintenance` 不会因为等待而成功。
+- 用旧数据库覆盖已前进的高水位事实后，服务进入维护。等到签名窗口结束，`clear-maintenance` 仍然不会补回丢失的 tombstone、稳定路径或已撤销 grant。只丢掉已消费 nonce、其余事实仍匹配时，同样进入维护；这个窗口比普通维护多一个时钟偏差再加 1 秒，窗口内不能重放，窗口结束后丢掉的 nonce 已过期，才可以清除这一项。
+- 正式模式的 WBA HTTPS 解引用发生在绑定事务提交并释放写锁之后。创建和状态更新都能因此读到新 generation。这项顺序由测试中的替身响应证明，不是公网验收。
 
 未执行，不能写成通过：
 
@@ -489,7 +490,7 @@ README 提供已经在本机执行过的最短路径：安装 → 启动 → 创
 - 同一签名重复发送、并发发送以及在有效期内重启后重放，最多首次合法请求成功。
 - Handle 正反向一致；generation 递增；撤销后不能重分配；WBA 精确端点不一致与 Web Provider 域名不一致各按对应规则失败。
 - suspended 用 200 记录可被 SDK 解析但不能作为活动绑定；revoked 同一 owner 也不能恢复；幂等状态写不增加 generation；前导零 generation 被拒绝。
-- 旧快照缺少高水位、归属或 tombstone 时保持维护状态，不从旧数据开始正常服务；认证失败 Header 与 JSON 分类一致，发布凭据不替代 DID 签名。
+- 旧快照缺少高水位事实、归属、tombstone，或只丢掉已消费 nonce 时保持维护状态，不从旧数据开始正常服务。等到窗口结束也不能补回丢失的归属或 tombstone。认证失败 Header 与 JSON 分类一致，发布凭据不替代 DID 签名。
 - 标准 DID 路径的 404、ETag/304、并发更新的版本冲突和代理外部 URL 重建符合约定。
 - 本地 IP 请求使用真实 IP URL 签名，仍保留合法域名 DID；通过显式 override 读取文档；不把本地 HTTP 名称查询当作正式 HTTPS 绑定证明。
 - 独立客户端进程通过真实 HTTP 发出请求，避免只用进程内路由调用代替完整示例。正式 HTTPS 请求没有在本次验收中发出。

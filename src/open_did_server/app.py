@@ -54,10 +54,10 @@ def external_target_uri(scope: dict, settings: Settings) -> str:
     return f"{settings.request_base_url}{suffix}"
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, clock=None) -> FastAPI:
     active = settings or load_settings()
     store = Store(active.database_path)
-    service = Service(active, store)
+    service = Service(active, store, clock=clock)
     service.startup()
     app = FastAPI(title="Open DID Server", version=__version__, redirect_slashes=False)
     app.state.settings = active

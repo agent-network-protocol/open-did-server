@@ -1,11 +1,14 @@
 """A restored database that drops a high-water fact stays in maintenance."""
 
 import shutil
+import sqlite3
+import time
 from pathlib import Path
 
 import httpx
 
 from open_did_server.errors import ApiError
+from open_did_server.highwater import read_facts
 from open_did_server.identity import sign_headers
 from open_did_server.service import Service
 from open_did_server.signatures import PROFILE_WHOAMI
@@ -64,5 +67,95 @@ def test_restored_database_cannot_clear_maintenance_by_waiting():
             assert "High-water" in exc.message
         else:
             raise AssertionError("maintenance cleared without the revoked grant")
+        with sqlite3.connect(database) as connection:
+            resume = int(
+                connection.execute(
+                    "SELECT value FROM meta WHERE key = 'auth_resume_after'"
+                ).fetchone()[0]
+            )
+        restored.clock = lambda: resume + 1
+        try:
+            restored.clear_maintenance()
+        except ApiError as exc:
+            assert exc.status == 409
+            assert "High-water" in exc.message
+        else:
+            raise AssertionError("waiting restored a missing revoked grant")
+    finally:
+        http.stop()
+
+
+def test_restoring_consumed_nonces_blocks_replay_until_the_window_ends():
+    clock = {"now": int(time.time())}
+
+    def now() -> int:
+        return clock["now"]
+
+    fixture = started(clock=now)
+    server = fixture.__enter__()
+    try:
+        _grant_id, token = _grant(server, web=["identities/web/bob"])
+        web, key = _web()
+        clock["now"] = int(time.time())
+        published, _raw = _publish(server, web, key, token)
+        assert published.status_code == 201, published.text
+        server.service.store.checkpoint()
+        snapshot = server.tmp / "snapshot.db"
+        shutil.copy(server.settings.database_path, snapshot)
+        whoami_url = server.base + "/examples/auth/whoami"
+        clock["now"] = int(time.time())
+        headers = sign_headers(web, key, "GET", whoami_url, PROFILE_WHOAMI)
+        accepted = server.client.get(whoami_url, headers=headers)
+        assert accepted.status_code == 200, accepted.text
+        watermark = read_facts(server.settings.high_water_path)
+        assert watermark is not None
+        assert watermark.nonce_watermark >= 2
+    finally:
+        fixture.__exit__(None, None, None)
+
+    database = Path(server.settings.database_path)
+    shutil.copy(snapshot, database)
+    for suffix in ("-wal", "-shm"):
+        leftover = Path(str(database) + suffix)
+        if leftover.exists():
+            leftover.unlink()
+    with sqlite3.connect(database) as connection:
+        stored = connection.execute(
+            "SELECT value FROM meta WHERE key = 'nonce_watermark'"
+        ).fetchone()
+    assert stored is not None
+    assert int(stored[0]) < watermark.nonce_watermark
+
+    clock["now"] = int(time.time())
+    restored = Service(server.settings, Store(server.settings.database_path), clock=now)
+    reason = restored.startup()
+    assert reason is not None
+    assert "replay" in reason
+    http = _Server(server.settings, clock=now)
+    http.start()
+    try:
+        with httpx.Client(trust_env=False, timeout=10) as client:
+            replay = client.get(whoami_url, headers=headers)
+            assert replay.status_code == 503, replay.text
+            assert replay.json()["error"] == "maintenance"
+        with sqlite3.connect(database) as connection:
+            resume = int(
+                connection.execute(
+                    "SELECT value FROM meta WHERE key = 'auth_resume_after'"
+                ).fetchone()[0]
+            )
+        clock["now"] = resume - 1
+        try:
+            restored.clear_maintenance()
+        except ApiError as exc:
+            assert "signature window" in exc.message
+        else:
+            raise AssertionError("replay gap cleared before the signature window")
+        clock["now"] = resume
+        restored.clear_maintenance()
+        with httpx.Client(trust_env=False, timeout=10) as client:
+            after = client.get(whoami_url, headers=headers)
+        assert after.status_code == 401, after.text
+        assert after.json()["error"] == "invalid_timestamp"
     finally:
         http.stop()

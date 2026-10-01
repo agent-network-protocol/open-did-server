@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 import time
 import urllib.request
 from collections.abc import Callable
@@ -20,7 +21,7 @@ from open_did_server.canonical import canonical_url_for_http_path, decode_segmen
 from open_did_server.config import Settings
 from open_did_server.documents import RESERVED_HANDLES, declaration_satisfies, validate_document
 from open_did_server.errors import ApiError, auth_error
-from open_did_server.highwater import EMPTY, read_facts, satisfies, write_facts
+from open_did_server.highwater import EMPTY, read_facts, structural_satisfies, write_facts
 from open_did_server.jsonutil import parse_json_object
 from open_did_server.signatures import (
     PROFILE_CREATE,
@@ -142,6 +143,7 @@ class Service:
         self.settings = settings
         self.store = store
         self.clock = clock or (lambda: int(time.time()))
+        self._high_water_lock = threading.Lock()
 
     def startup(self) -> str | None:
         """Reconcile the sidecar. Return a maintenance reason when service writes must stop."""
@@ -159,12 +161,16 @@ class Service:
             reason = "high-water file is missing for a non-empty database"
             self._enter_maintenance(reason, refresh=False)
             return reason
-        if satisfies(reference, current):
-            write_facts(self.settings.high_water_path, current)
-            return self._maintenance_reason()
-        reason = "database is behind the high-water file"
-        self._enter_maintenance(reason, refresh=False)
-        return reason
+        if not structural_satisfies(reference, current):
+            reason = "database is behind the high-water file"
+            self._enter_maintenance(reason, refresh=False)
+            return reason
+        if current.nonce_watermark < reference.nonce_watermark:
+            reason = "replay watermark is ahead of the database"
+            self._enter_maintenance(reason, refresh=True, replay_gap=True)
+            return reason
+        write_facts(self.settings.high_water_path, current)
+        return self._maintenance_reason()
 
     def create_grant(
         self,
@@ -255,7 +261,7 @@ class Service:
     def clear_maintenance(self) -> None:
         current = self._facts()
         reference = read_facts(self.settings.high_water_path)
-        if reference is None or not satisfies(reference, current):
+        if reference is None or not structural_satisfies(reference, current):
             raise ApiError(
                 409,
                 "maintenance",
@@ -735,7 +741,7 @@ class Service:
             )
             return Result(200, body_out, {"ETag": generation_etag(generation)}), True
 
-        return self._run(run, profile)
+        return self._apply_exact_handle(self._run(run, profile))
 
     def read_handle(self, local_part: str) -> Result:
         return self._read_name(local_part, by_did=None)
@@ -816,6 +822,7 @@ class Service:
         exact: bool,
     ) -> dict[str, Any]:
         observed = canonicalize_binding_generation(generation)
+        pending_exact = False
         if self.settings.local_demo:
             verification = "declaration-consistent" if exact else "web-provider-domain"
             note = (
@@ -827,13 +834,11 @@ class Service:
             verification = "web-provider-domain"
             note = "Web binding uses provider-domain declaration compatibility. It is not exact-handle."
         else:
-            verification, note = _dereference_exact_handle(
-                handle,
-                did,
-                observed,
-                self.settings.handle_provider_domain,
-            )
-        return {
+            # The public GET must observe the committed generation. Do the HTTPS read after commit.
+            pending_exact = True
+            verification = "declaration-consistent"
+            note = "Public HTTPS dereference did not complete. This result is not exact-handle."
+        body = {
             "handle": handle,
             "did": did,
             "status": status,
@@ -845,6 +850,24 @@ class Service:
             "observed_document_version": document_version,
             "observed_binding_generation": observed,
         }
+        if pending_exact:
+            body["_exact_handle_check"] = True
+        return body
+
+    def _apply_exact_handle(self, result: Result) -> Result:
+        """Dereference a WBA Handle only after its binding transaction has committed."""
+        if not isinstance(result.body, dict) or not result.body.get("_exact_handle_check"):
+            return result
+        body = {key: value for key, value in result.body.items() if key != "_exact_handle_check"}
+        verification, note = _dereference_exact_handle(
+            str(body["handle"]),
+            str(body["did"]),
+            str(body["binding_generation"]),
+            self.settings.handle_provider_domain,
+        )
+        body["verification"] = verification
+        body["verification_note"] = note
+        return Result(result.status, body, result.headers, result.media_type)
 
     def _read_name(self, local_part: str | None, by_did: str | None) -> Result:
         connection = self.store.connect()
@@ -949,6 +972,8 @@ class Service:
                 "INSERT INTO used_nonces(keyid, nonce, expires_at) VALUES(?, ?, ?)",
                 (parsed.keyid, parsed.nonce, parsed.expires + self.settings.clock_skew),
             )
+            current_mark = int(self.store.meta_get(connection, "nonce_watermark") or "0")
+            self.store.meta_set(connection, "nonce_watermark", str(current_mark + 1))
         except sqlite3.IntegrityError as exc:
             if "used_nonces" in str(exc):
                 raise _Replay(profile) from exc
@@ -964,8 +989,7 @@ class Service:
             return _auth_failure(exc.profile, "invalid_nonce", "This signature has already been used")
         except ApiError:
             raise
-        if changed:
-            self._sync_high_water()
+        self._sync_high_water()
         return result
 
     def _consume_failure(
@@ -1020,21 +1044,37 @@ class Service:
             connection.close()
 
     def _sync_high_water(self) -> None:
-        current = self._facts()
-        reference = read_facts(self.settings.high_water_path)
-        if reference is not None and not satisfies(reference, current):
-            self._enter_maintenance("database is behind the high-water file", refresh=False)
-            return
-        write_facts(self.settings.high_water_path, current)
+        with self._high_water_lock:
+            current = self._facts()
+            reference = read_facts(self.settings.high_water_path)
+            if reference is not None and not structural_satisfies(reference, current):
+                self._enter_maintenance("database is behind the high-water file", refresh=False)
+                return
+            if reference is not None and current.nonce_watermark < reference.nonce_watermark:
+                self._enter_maintenance(
+                    "replay watermark is ahead of the database",
+                    refresh=False,
+                    replay_gap=True,
+                )
+                return
+            latest = read_facts(self.settings.high_water_path)
+            if latest is not None and latest.nonce_watermark > current.nonce_watermark:
+                return
+            write_facts(self.settings.high_water_path, current)
 
-    def _enter_maintenance(self, reason: str, *, refresh: bool) -> None:
+    def _enter_maintenance(self, reason: str, *, refresh: bool, replay_gap: bool = False) -> None:
         with self.store.immediate() as connection:
             already = self.store.maintenance(connection)
             self.store.meta_set(connection, "maintenance", "1")
             self.store.meta_set(connection, "maintenance_reason", reason)
             if refresh or not already or self.store.meta_get(connection, "auth_resume_after") is None:
-                resume_at = self.clock() + self.settings.signature_lifetime + self.settings.clock_skew
-                self.store.meta_set(connection, "auth_resume_after", str(resume_at))
+                # A consumed signature may have been created one skew in the future and
+                # remains acceptable until expires plus another skew. The replay gap waits
+                # that whole horizon so clearing maintenance cannot revive it.
+                span = self.settings.signature_lifetime + self.settings.clock_skew
+                if replay_gap:
+                    span += self.settings.clock_skew + 1
+                self.store.meta_set(connection, "auth_resume_after", str(self.clock() + span))
 
     def _maintenance_reason(self) -> str | None:
         connection = self.store.connect()
@@ -1098,7 +1138,11 @@ class Service:
 
 def _facts_empty(facts) -> bool:
     return facts == EMPTY or (
-        not facts.generations and not facts.tombstones and not facts.revoked_grants and not facts.stable_paths
+        not facts.generations
+        and not facts.tombstones
+        and not facts.revoked_grants
+        and not facts.stable_paths
+        and facts.nonce_watermark == 0
     )
 
 

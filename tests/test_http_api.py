@@ -598,6 +598,155 @@ def test_untrusted_forwarded_host_does_not_change_the_signed_url():
         assert rejected.status_code == 401
 
 
+def test_production_exact_handle_is_read_after_the_binding_commits():
+    import sqlite3
+    from unittest.mock import patch
+
+    observed = {}
+
+    class _Response:
+        status = 200
+
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+
+        def read(self) -> bytes:
+            return self._payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args) -> bool:
+            return False
+
+    with started(local_demo=False, request_base_url="https://example.test") as server:
+        _grant_id, token = _grant(server, wba=["identities/wba/alice"], handles=["alice.example.test"])
+        document, key = create_wba_identity(
+            "example.test",
+            ["identities", "wba", "alice"],
+            "alice",
+            "example.test",
+        )
+        body = _dumps(document)
+        publish_url = "https://example.test/api/v1/did-documents"
+        published = server.client.post(
+            server.base + "/api/v1/did-documents",
+            content=body,
+            headers=sign_headers(
+                document,
+                key,
+                "POST",
+                publish_url,
+                PROFILE_CREATE,
+                body,
+                {"Content-Type": "application/json", "ANP-Publication-Token": token},
+            ),
+        )
+        assert published.status_code == 201, published.text
+
+        def urlopen(url, timeout=3):
+            observed["url"] = url
+            connection = sqlite3.connect(server.settings.database_path, timeout=0.5)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT binding_generation, status, did FROM handle_bindings WHERE local_part = ?",
+                    ("alice",),
+                ).fetchone()
+                connection.rollback()
+            except sqlite3.OperationalError as exc:
+                observed["error"] = str(exc)
+                raise
+            finally:
+                connection.close()
+            observed["row"] = row
+            payload = json.dumps(
+                {
+                    "handle": "alice.example.test",
+                    "did": document["id"],
+                    "status": row[1] if row else "",
+                    "binding_generation": row[0] if row else "",
+                }
+            ).encode()
+            return _Response(payload)
+
+        handle_body = _dumps({"did": document["id"], "status": "active"})
+        handle_url = "https://example.test/api/v1/handles/alice"
+        with patch("open_did_server.service.urllib.request.urlopen", urlopen):
+            created = server.client.put(
+                server.base + "/api/v1/handles/alice",
+                content=handle_body,
+                headers=sign_headers(
+                    document,
+                    key,
+                    "PUT",
+                    handle_url,
+                    PROFILE_CREATE,
+                    handle_body,
+                    {"Content-Type": "application/json", "ANP-Publication-Token": token},
+                ),
+            )
+            assert created.status_code == 201, created.text
+            assert observed["url"] == "https://example.test/.well-known/handle/alice"
+            assert observed["row"] == ("1", "active", document["id"])
+            assert "error" not in observed
+            assert created.json()["verification"] == "exact-handle"
+            assert created.json()["binding_generation"] == "1"
+
+            suspend_body = _dumps({"did": document["id"], "status": "suspended"})
+            suspended = server.client.put(
+                server.base + "/api/v1/handles/alice",
+                content=suspend_body,
+                headers=sign_headers(
+                    document,
+                    key,
+                    "PUT",
+                    handle_url,
+                    PROFILE_UPDATE,
+                    suspend_body,
+                    {
+                        "Content-Type": "application/json",
+                        "If-Match": created.json()["etag"],
+                        "ANP-Publication-Token": token,
+                    },
+                ),
+            )
+            assert suspended.status_code == 200, suspended.text
+            assert observed["row"] == ("2", "suspended", document["id"])
+            assert "error" not in observed
+            assert suspended.json()["verification"] == "declaration-consistent"
+            assert suspended.json()["binding_generation"] == "2"
+
+            restore_body = _dumps({"did": document["id"], "status": "active"})
+            restored = server.client.put(
+                server.base + "/api/v1/handles/alice",
+                content=restore_body,
+                headers=sign_headers(
+                    document,
+                    key,
+                    "PUT",
+                    handle_url,
+                    PROFILE_UPDATE,
+                    restore_body,
+                    {
+                        "Content-Type": "application/json",
+                        "If-Match": suspended.json()["etag"],
+                        "ANP-Publication-Token": token,
+                    },
+                ),
+            )
+            assert restored.status_code == 200, restored.text
+            assert observed["url"] == "https://example.test/.well-known/handle/alice"
+            assert observed["row"] == ("3", "active", document["id"])
+            assert "error" not in observed
+            assert restored.json()["verification"] == "exact-handle"
+            assert restored.json()["binding_generation"] == "3"
+        public = server.client.get(server.base + "/.well-known/handle/alice")
+        assert public.status_code == 200
+        assert public.json()["binding_generation"] == "3"
+        assert public.json()["status"] == "active"
+
+
 def test_public_port_stays_in_the_did_and_out_of_the_handle_url():
     with started(public_did_port=8443) as server:
         _grant_id, token = _grant(

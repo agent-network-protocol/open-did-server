@@ -84,7 +84,7 @@ SDK 会按固定顺序重排参数后再验签。本服务在调用 SDK 之前�
 
 本地 DID 暂停会在同一事务里暂停依赖的活动 Handle 并增加 generation。恢复 DID 不会恢复 Handle。Handle 的暂停或撤销也不会自动停用 DID。DID 暂停入口是管理命令 `set-auth-status`，没有对应的公开 HTTP 写接口。
 
-首次绑定提交前，不要求该 Handle 的公开入口已经返回 active。本地模式的响应字段 `verification` 是 `declaration-consistent`（WBA）或 `web-provider-domain`（Web），并写明这不是 `exact-handle`。正式模式才会对 WBA 做默认 TLS 的公开 HTTPS 读取；读不到时仍标为 `declaration-consistent`。
+首次绑定提交前，不要求该 Handle 的公开入口已经返回 active。绑定事务提交之后，正式模式才对 WBA 做默认 TLS 的公开 HTTPS 读取；读取发生在锁释放之后，所以公开入口能看到刚刚提交的 generation。读不到，或返回的 generation 还不是这一次提交的值时，结果仍是 `declaration-consistent`。本地模式不访问网络，`verification` 是 `declaration-consistent`（WBA）或 `web-provider-domain`（Web），并写明这不是 `exact-handle`。
 
 ## 示例认证
 
