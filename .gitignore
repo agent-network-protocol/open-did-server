@@ -1,0 +1,22 @@
+# Local credentials and generated identities
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+data/
+
+# Python tooling
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Local editor and operating system files
+.idea/
+.vscode/
+.DS_Store
